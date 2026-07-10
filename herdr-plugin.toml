@@ -3,7 +3,7 @@ name = "Herdr Telegram + Slack Bridge"
 version = "0.2.0"
 min_herdr_version = "0.7.0"
 description = "Bidirectional Telegram and Slack bot bridge for blocked Herdr agents, with replies routed back to the originating pane."
-platforms = ["linux", "macos", "windows"]
+platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.agent_status_changed"
