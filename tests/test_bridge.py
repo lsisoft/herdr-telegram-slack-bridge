@@ -11,6 +11,32 @@ from agent_telegram_bridge import cli
 
 
 class BridgeTests(unittest.TestCase):
+    def test_herdr_pane_info_uses_default_json_output_without_json_flag(self) -> None:
+        response = {
+            "id": "cli:pane:get",
+            "result": {
+                "type": "pane_info",
+                "pane": {
+                    "agent": "codex",
+                    "cwd": "/work/repo",
+                    "pane_id": "w1:p7",
+                    "tab_id": "w1:t7",
+                    "workspace_id": "w1",
+                },
+            },
+        }
+        with mock.patch.object(
+            cli,
+            "herdr_command",
+            return_value=mock.Mock(returncode=0, stdout=cli.json.dumps(response), stderr=""),
+        ) as command:
+            pane = cli.herdr_pane_info("w1:p7")
+        command.assert_called_once_with(["pane", "get", "w1:p7"])
+        self.assertEqual(pane.pane_id, "w1:p7")
+        self.assertEqual(pane.session_name, "w1")
+        self.assertEqual(pane.window_index, "w1:t7")
+        self.assertEqual(pane.pane_index, "7")
+
     def test_herdr_target_uses_herdr_cli_for_input(self) -> None:
         target = "w1:p2"
         with mock.patch.object(
@@ -48,6 +74,7 @@ class BridgeTests(unittest.TestCase):
         payload = cli.json.loads(notify.call_args.args[0][0])
         self.assertEqual(payload["pane_id"], "w1:p2")
         self.assertEqual(payload["agent_status"], "blocked")
+
     def confirmed_send_result(self) -> cli.TmuxSendResult:
         return cli.TmuxSendResult(
             processed=True,

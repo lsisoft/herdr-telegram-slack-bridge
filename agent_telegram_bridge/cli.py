@@ -86,7 +86,10 @@ def herdr_command(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def herdr_json_command(args: list[str]) -> dict[str, Any]:
-    result = herdr_command([*args, "--json"])
+    # Herdr's control commands emit JSON by default. Some releases reject a
+    # generic --json flag even though plugin list and a few other commands
+    # accept one explicitly.
+    result = herdr_command(args)
     if result.returncode != 0:
         return {}
     try:
@@ -108,10 +111,12 @@ def herdr_pane_info(target: str) -> PaneInfo:
         return PaneInfo(pane_id=target)
     agent = pane.get("agent") if isinstance(pane.get("agent"), dict) else {}
     return PaneInfo(
-        session_name=str(workspace.get("label") or workspace.get("workspace_id") or "herdr"),
-        window_index=str(tab.get("index") or tab.get("tab_id") or ""),
-        window_name=str(tab.get("label") or ""),
-        pane_index=str(pane.get("pane_index") or ""),
+        session_name=str(
+            workspace.get("label") or workspace.get("workspace_id") or pane.get("workspace_id") or "herdr"
+        ),
+        window_index=str(tab.get("index") or tab.get("tab_id") or pane.get("tab_id") or ""),
+        window_name=str(tab.get("label") or pane.get("tab_id") or ""),
+        pane_index=str(pane.get("pane_index") or str(pane.get("pane_id") or "").partition(":p")[2]),
         pane_id=str(pane.get("pane_id") or target),
         pane_current_command=str(pane.get("foreground_command") or pane.get("command") or ""),
         pane_current_path=str(pane.get("foreground_cwd") or pane.get("cwd") or ""),
