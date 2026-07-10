@@ -1,0 +1,16 @@
+[Unit]
+Description=Slack reply bridge for Herdr, Codex, and Claude agent sessions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEGRAM_BRIDGE_ENV_FILES=@PROJECT_ROOT@/.env:%h/.config/agent_telegram_bridge/env
+ExecStart=/usr/bin/python3 -m agent_telegram_bridge slack-daemon
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
