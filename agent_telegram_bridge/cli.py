@@ -784,6 +784,17 @@ def process_slack_message_event(event: dict[str, Any], store: StateStore) -> Non
         slack_send_messages(channel_id, message, thread_ts=thread_ts)
 
     def mutate(state: dict[str, Any]) -> None:
+        thread_alert = latest_alert_for_slack_thread(state, channel_id, thread_ts)
+        if thread_alert:
+            ticket = canonical_ticket_id(thread_alert.get("id") or "")
+            response_holder["text"] = send_reply_to_alert(
+                state,
+                ticket,
+                text,
+                warning_callback=send_warning,
+            )
+            return
+
         command, rest = slack_command(text)
         if command in {"start", "help"}:
             response_holder["text"] = (

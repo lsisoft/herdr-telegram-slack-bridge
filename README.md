@@ -83,7 +83,7 @@ The bridge creates and reuses one topic per exact tmux window label, such as `co
 
 ## Slack setup
 
-Slack support posts each alert as a new top-level channel message. The top line is a compact host/session/window route header, for example `host:codex:2:cry [cr4]`. Replies in that Slack message thread route back to the captured pane for that alert. The default receiver mode is polling, so it does not require Slack Event Subscriptions, a public Request URL, or a tunnel. The Slack bridge uses normal thread messages, not Slack slash commands.
+Slack support posts each alert as a new top-level channel message. The top line is a compact host/session/window route header, for example `host:codex:2:cry [cr4]`. Replies in that Slack message thread route back to the captured pane for that alert. Thread text is always forwarded verbatim, including text beginning with words such as `help`, `status`, or `reply`; bot command parsing is only used outside a known alert thread. The default receiver mode is polling, so it does not require Slack Event Subscriptions, a public Request URL, or a tunnel. The Slack bridge uses normal thread messages, not Slack slash commands.
 
 Register the Slack app:
 

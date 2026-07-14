@@ -567,6 +567,49 @@ class BridgeTests(unittest.TestCase):
         slack_send.assert_called_once()
         self.assertEqual(slack_send.call_args.kwargs["thread_ts"], "10.0")
 
+    def test_slack_alert_thread_forwards_command_like_text_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = cli.StateStore(Path(tmp) / "state.json")
+            store.write(
+                {
+                    "last_alert_id": "A1B",
+                    "alerts": {
+                        "A1B": {
+                            "id": "A1B",
+                            "status": "open",
+                            "created_at": int(time.time()),
+                            "send_target": "%9",
+                            "display_target": "codex:1.0",
+                            "slack_channel_id": "C1",
+                            "slack_thread_ts": "10.0",
+                        }
+                    },
+                }
+            )
+            with mock.patch.object(cli, "tmux_target_exists", return_value=True), mock.patch.object(
+                cli, "tmux_send_text", return_value=self.confirmed_send_result()
+            ) as send_text, mock.patch.object(cli, "slack_send_messages") as slack_send:
+                cli.process_slack_message_event(
+                    {
+                        "type": "message",
+                        "channel": "C1",
+                        "thread_ts": "10.0",
+                        "ts": "10.2",
+                        "text": "help me choose",
+                        "user": "U1",
+                    },
+                    store,
+                )
+
+        send_text.assert_called_once_with(
+            "%9",
+            "help me choose",
+            warning_callback=mock.ANY,
+            target_label="codex:1.0",
+        )
+        slack_send.assert_called_once()
+        self.assertNotIn("Commands:", slack_send.call_args.args[1])
+
     def test_slack_poll_once_routes_thread_reply_without_message_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = cli.StateStore(Path(tmp) / "state.json")
