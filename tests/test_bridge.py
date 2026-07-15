@@ -12,7 +12,7 @@ from agent_telegram_bridge import cli
 
 class BridgeTests(unittest.TestCase):
     def test_herdr_pane_info_uses_default_json_output_without_json_flag(self) -> None:
-        response = {
+        pane_response = {
             "id": "cli:pane:get",
             "result": {
                 "type": "pane_info",
@@ -25,17 +25,62 @@ class BridgeTests(unittest.TestCase):
                 },
             },
         }
+        tabs_response = {
+            "id": "cli:tab:list",
+            "result": {
+                "type": "tab_list",
+                "tabs": [
+                    {"tab_id": "w1:t1", "label": "fx", "workspace_id": "w1"},
+                    {"tab_id": "w1:t2", "label": "ibkr", "workspace_id": "w1"},
+                    {"tab_id": "w1:t3", "label": "cry", "workspace_id": "w1"},
+                    {"tab_id": "w1:t7", "label": "sys", "number": 7, "workspace_id": "w1"},
+                ],
+            },
+        }
         with mock.patch.object(
             cli,
             "herdr_command",
-            return_value=mock.Mock(returncode=0, stdout=cli.json.dumps(response), stderr=""),
+            side_effect=[
+                mock.Mock(returncode=0, stdout=cli.json.dumps(pane_response), stderr=""),
+                mock.Mock(returncode=0, stdout=cli.json.dumps(tabs_response), stderr=""),
+            ],
         ) as command:
             pane = cli.herdr_pane_info("w1:p7")
-        command.assert_called_once_with(["pane", "get", "w1:p7"])
+        self.assertEqual(
+            command.call_args_list,
+            [
+                mock.call(["pane", "get", "w1:p7"]),
+                mock.call(["tab", "list", "--workspace", "w1"]),
+            ],
+        )
         self.assertEqual(pane.pane_id, "w1:p7")
-        self.assertEqual(pane.session_name, "w1")
-        self.assertEqual(pane.window_index, "w1:t7")
+        self.assertEqual(pane.session_name, "herdr")
+        self.assertEqual(pane.window_index, "4")
+        self.assertEqual(pane.window_name, "sys")
         self.assertEqual(pane.pane_index, "7")
+        self.assertEqual(pane.display_target, "herdr:4:sys")
+        self.assertEqual(pane.send_target, "w1:p7")
+
+    def test_herdr_pane_info_falls_back_to_persistent_tab_number(self) -> None:
+        with mock.patch.object(
+            cli,
+            "herdr_json_command",
+            side_effect=[
+                {"pane": {"pane_id": "w1:p7", "tab_id": "w1:t7", "workspace_id": "w1"}},
+                {"tabs": []},
+                {"tab": {"tab_id": "w1:t7", "label": "sys", "number": 7}},
+            ],
+        ) as command:
+            pane = cli.herdr_pane_info("w1:p7")
+        self.assertEqual(
+            command.call_args_list,
+            [
+                mock.call(["pane", "get", "w1:p7"]),
+                mock.call(["tab", "list", "--workspace", "w1"]),
+                mock.call(["tab", "get", "w1:t7"]),
+            ],
+        )
+        self.assertEqual(pane.display_target, "herdr:7:sys")
 
     def test_herdr_target_uses_herdr_cli_for_input(self) -> None:
         target = "w1:p2"
@@ -411,6 +456,27 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(alert["send_target"], "%9")
         self.assertEqual(alert["window_name"], "node")
         self.assertEqual(alert["question"], "What should I do?")
+
+    def test_create_alert_uses_visible_herdr_tab_label_but_keeps_internal_route(self) -> None:
+        pane = cli.PaneInfo(
+            session_name="herdr",
+            window_index="4",
+            window_name="sys",
+            pane_index="7",
+            pane_id="w1:p7",
+            pane_current_path="/work",
+        )
+        alert = cli.create_alert(
+            "codex",
+            {"last-assistant-message": "Continue?", "thread-id": "thread-1"},
+            pane,
+            ticket_id="sy1",
+        )
+        self.assertEqual(alert["backend"], "herdr")
+        self.assertEqual(alert["display_target"], "herdr:4:sys")
+        self.assertEqual(alert["send_target"], "w1:p7")
+        self.assertEqual(cli.compact_alert_header(alert), "herdr:4:sys [sy1]")
+        self.assertEqual(cli.alert_thread_name(alert), "herdr 4:sys")
 
     def test_plain_reply_uses_ticket_from_replied_alert(self) -> None:
         state = {"last_alert_id": "", "alerts": {"1": {"id": "1"}}}

@@ -68,6 +68,9 @@ class PaneInfo:
 
     @property
     def display_target(self) -> str:
+        if is_herdr_target(self.pane_id):
+            parts = [self.session_name or "herdr", self.window_index, self.window_name]
+            return ":".join(part for part in parts if part)
         if self.session_name and self.window_index and self.pane_index:
             return f"{self.session_name}:{self.window_index}.{self.pane_index}"
         return self.pane_id or ""
@@ -105,17 +108,35 @@ def herdr_json_command(args: list[str]) -> dict[str, Any]:
 def herdr_pane_info(target: str) -> PaneInfo:
     payload = herdr_json_command(["pane", "get", target])
     pane = payload.get("pane") if isinstance(payload.get("pane"), dict) else payload
-    workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
-    tab = payload.get("tab") if isinstance(payload.get("tab"), dict) else {}
     if not isinstance(pane, dict):
-        return PaneInfo(pane_id=target)
+        return PaneInfo(session_name="herdr", pane_id=target)
+
+    workspace_id = str(pane.get("workspace_id") or "").strip()
+    tab_id = str(pane.get("tab_id") or "").strip()
+    tab = payload.get("tab") if isinstance(payload.get("tab"), dict) else {}
+    visible_position = ""
+    list_args = ["tab", "list"]
+    if workspace_id:
+        list_args.extend(["--workspace", workspace_id])
+    tabs_payload = herdr_json_command(list_args)
+    tabs = tabs_payload.get("tabs") if isinstance(tabs_payload.get("tabs"), list) else []
+    for position, candidate in enumerate(tabs, start=1):
+        if not isinstance(candidate, dict) or str(candidate.get("tab_id") or "") != tab_id:
+            continue
+        visible_position = str(position)
+        tab = {**tab, **candidate}
+        break
+    if not tab and tab_id:
+        tab_payload = herdr_json_command(["tab", "get", tab_id])
+        tab = tab_payload.get("tab") if isinstance(tab_payload.get("tab"), dict) else {}
+
     agent = pane.get("agent") if isinstance(pane.get("agent"), dict) else {}
+    tab_suffix = tab_id.partition(":t")[2]
+    fallback_window_name = f"tab-{tab_suffix}" if tab_suffix else ""
     return PaneInfo(
-        session_name=str(
-            workspace.get("label") or workspace.get("workspace_id") or pane.get("workspace_id") or "herdr"
-        ),
-        window_index=str(tab.get("index") or tab.get("tab_id") or pane.get("tab_id") or ""),
-        window_name=str(tab.get("label") or pane.get("tab_id") or ""),
+        session_name="herdr",
+        window_index=visible_position or str(tab.get("number") or tab_suffix or ""),
+        window_name=str(tab.get("label") or pane.get("title") or fallback_window_name),
         pane_index=str(pane.get("pane_index") or str(pane.get("pane_id") or "").partition(":p")[2]),
         pane_id=str(pane.get("pane_id") or target),
         pane_current_command=str(pane.get("foreground_command") or pane.get("command") or ""),
@@ -506,6 +527,12 @@ def telegram_create_forum_topic(chat_id: str, name: str) -> int:
     return int(result["message_thread_id"])
 
 
+def alert_uses_herdr(alert: dict[str, Any]) -> bool:
+    backend = str(alert.get("backend") or "").strip().lower()
+    target = str(alert.get("send_target") or alert.get("pane_id") or "").strip()
+    return backend == "herdr" or is_herdr_target(target)
+
+
 def alert_tmux_session_name(alert: dict[str, Any]) -> str:
     session = str(alert.get("session_name") or "").strip()
     if session:
@@ -587,7 +614,10 @@ def thread_record_for_alert(records: dict[str, Any], alert: dict[str, Any]) -> t
 
 def alert_thread_name(alert: dict[str, Any]) -> str:
     label = alert_thread_label(alert)
-    name = f"tmux {label}" if label else "tmux session"
+    if alert_uses_herdr(alert):
+        name = f"herdr {label.removeprefix('herdr:')}" if label else "herdr session"
+    else:
+        name = f"tmux {label}" if label else "tmux session"
     return re.sub(r"\s+", " ", name).strip()[:128] or "agent session"
 
 
@@ -699,11 +729,13 @@ def slack_retry_after_seconds(exc: Exception) -> float | None:
 
 
 def compact_alert_header(alert: dict[str, Any]) -> str:
+    ticket = canonical_ticket_id(alert.get("id") or "")
+    if alert_uses_herdr(alert):
+        return f"{alert_thread_label(alert)} [{ticket}]"
     hostname = str(alert.get("hostname") or socket.gethostname() or "").strip()
     session = lowercase_tmux_session_label(alert.get("session_name") or alert.get("agent") or "agent")
     window_index = str(alert.get("window_index") or "").strip()
     window = str(alert.get("window_name") or "(unnamed)").strip()
-    ticket = canonical_ticket_id(alert.get("id") or "")
     return f"{hostname}:{session}:{window_index}:{window} [{ticket}]"
 
 

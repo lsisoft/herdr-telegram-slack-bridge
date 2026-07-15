@@ -23,5 +23,9 @@ The plugin reads the bridge's normal environment variables. Set
 `HERDR_BRIDGE_STATUSES=blocked,done` if notifications for completed agents are
 also wanted; the default is `blocked`, which matches "needs input" behavior.
 
+Herdr alerts use the ordered position and label from `herdr tab list` for their
+public route, such as `herdr:4:sys`. The opaque pane id, such as `w1:p7`, is
+stored separately and remains the target used for replies.
+
 For a GitHub publication, this directory can be the repository root and must
 be tagged with the `herdr-plugin` GitHub topic for marketplace discovery.

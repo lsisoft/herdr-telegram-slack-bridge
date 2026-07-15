@@ -9,7 +9,7 @@ Bidirectional Telegram and Slack bot bridge for Herdr, Codex, and Claude agent s
 - Stores a short ticket id for each alert, preferring one unused digit and then lowercase ids like `ab1`.
 - Splits long Telegram and Slack alerts/responses into multiple messages instead of truncating the question.
 - Sends Telegram output as escaped `MarkdownV2`.
-- Can route Telegram alerts into forum topics, one topic per exact tmux window label, when `TELEGRAM_BRIDGE_FORUM_TOPICS=1` is enabled in a forum-enabled supergroup.
+- Can route Telegram alerts into forum topics, one topic per exact Herdr tab or tmux window label, when `TELEGRAM_BRIDGE_FORUM_TOPICS=1` is enabled in a forum-enabled supergroup.
 - Posts alerts to Slack, one Slack thread per exact pane alert, and receives Slack thread replies through Web API polling. Slack Events API mode is also available.
 - Works with Herdr panes as well as tmux panes. The included `herdr-plugin.toml` emits alerts for Herdr `blocked` agents and sends replies through Herdr's pane API.
 - Runs a Telegram long-poll daemon that accepts:
@@ -62,7 +62,7 @@ When `TELEGRAM_BRIDGE_ENABLED=0` or `TELEGRAM_BRIDGE_DISABLED=1`, the notify hoo
 
 Slack replies forwarded into tmux are monitored for up to 120 seconds by default. The bridge sends `Enter`, `C-m`, `C-j`, and a tmux buffer newline paste, checks the pane every second, and if the pane does not accept the line it clears pending input, retypes the reply, and submits it again every second. On timeout it clears the pending input and posts a final warning back to Slack.
 
-Alert IDs are two letters from the tmux window name plus one digit, for example `cr4` for `cry`. The digit is selected to avoid IDs already used in recent state for the last 24 hours. Alert headers use the compact form `hostname:tmux-session:window-index:window-name [id]`.
+Alert IDs are two letters from the Herdr tab or tmux window name plus one digit, for example `cr4` for `cry`. The digit is selected to avoid IDs already used in recent state for the last 24 hours. Tmux alert headers use `hostname:tmux-session:window-index:window-name [id]`. Herdr headers use the shorter `herdr:visible-tab-position:tab-name [id]`, for example `herdr:4:sys [sy1]`; the internal pane id is retained separately for reply routing.
 
 For a direct Telegram user chat, `TELEGRAM_CHAT_ID` must be the numeric chat id for a chat where the bot has already been started. A Telegram username is used for authorization, not as a Bot API delivery address.
 
@@ -79,11 +79,11 @@ To separate sessions in Telegram:
 5. Set `TELEGRAM_CHAT_ID` to the numeric supergroup chat id.
 6. Set `TELEGRAM_BRIDGE_FORUM_TOPICS=1`.
 
-The bridge creates and reuses one topic per exact tmux window label, such as `codex:0:fx` or `codex:1:ibkr`, stores the `message_thread_id` in state, and sends alerts plus Telegram replies back into that topic. If the tmux window name changes, the label changes and a new topic is used. If topic creation fails, it logs the error and falls back to normal chat messages.
+The bridge creates and reuses one topic per exact Herdr tab or tmux window label, such as `herdr:4:sys`, `codex:0:fx`, or `codex:1:ibkr`, stores the `message_thread_id` in state, and sends alerts plus Telegram replies back into that topic. If the tab/window name changes, the label changes and a new topic is used. If topic creation fails, it logs the error and falls back to normal chat messages.
 
 ## Slack setup
 
-Slack support posts each alert as a new top-level channel message. The top line is a compact host/session/window route header, for example `host:codex:2:cry [cr4]`. Replies in that Slack message thread route back to the captured pane for that alert. Thread text is always forwarded verbatim, including text beginning with words such as `help`, `status`, or `reply`; bot command parsing is only used outside a known alert thread. The default receiver mode is polling, so it does not require Slack Event Subscriptions, a public Request URL, or a tunnel. The Slack bridge uses normal thread messages, not Slack slash commands.
+Slack support posts each alert as a new top-level channel message. The top line is a compact route header, for example `herdr:4:sys [sy1]` or `host:codex:2:cry [cr4]`. Replies in that Slack message thread route back to the captured pane for that alert. Thread text is always forwarded verbatim, including text beginning with words such as `help`, `status`, or `reply`; bot command parsing is only used outside a known alert thread. The default receiver mode is polling, so it does not require Slack Event Subscriptions, a public Request URL, or a tunnel. The Slack bridge uses normal thread messages, not Slack slash commands.
 
 Register the Slack app:
 
