@@ -2,6 +2,38 @@
 
 Bidirectional Telegram and Slack bot bridge for Herdr, Codex, and Claude agent sessions. It delivers blocked-agent alerts to either chat platform and routes replies back to the exact Herdr or tmux pane that raised the alert.
 
+## Repository identity
+
+`x/agent_telegram_bridge/` is the local checkout of
+[`lsisoft/herdr-telegram-slack-bridge`](https://github.com/lsisoft/herdr-telegram-slack-bridge).
+It is a notification and reply transport, not an AI agent and not a tmux or
+Herdr replacement.
+
+The related session manager is the
+[`lsisoft/herdr`](https://github.com/lsisoft/herdr) fork of
+[`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr). Herdr owns
+workspaces, tabs, agent processes, restart/resume metadata, models, compute
+settings, and launch permissions. This bridge observes an existing pane,
+sends alerts to Slack or Telegram, and forwards replies to that same pane. It
+does not launch agents, grant permissions, or restore sessions.
+
+The Python package name `agent_telegram_bridge` and the systemd filenames
+ending in `-tmux-bridge.service` are retained for compatibility with existing
+notify hooks and deployments. They do not identify a separate "tmux agent."
+The same package implements both routing backends:
+
+| Concern | Herdr backend | Direct tmux backend |
+| --- | --- | --- |
+| Session owner | Herdr server and workspace | Codex/Claude process running in a tmux pane |
+| Alert source | Herdr plugin events or native Codex/Claude notify hooks | Native Codex/Claude notify hooks |
+| Pane discovery | `HERDR_PANE_ID`, then `herdr pane/tab` metadata | `TMUX_PANE`, then `tmux display-message` metadata |
+| Reply delivery | `herdr pane run <pane-id> <text>` | `tmux send-keys` with submission monitoring and retries |
+| Public route | `herdr:<visible-tab-position>:<tab-name>` | `<host>:<tmux-session>:<window-index>:<window-name>` |
+| Internal route | Opaque Herdr pane id such as `w1:p7` | Stable tmux pane id such as `%9` |
+
+When both pane environment variables are present, the Herdr backend takes
+precedence. The transport and state store are otherwise shared.
+
 ## What it does
 
 - Runs as the existing Codex/Claude notify hook.
@@ -107,6 +139,10 @@ python3 -m agent_telegram_bridge slack-daemon
 ```
 
 ## Herdr plugin
+
+This repository is also the chat integration plugin for
+[`lsisoft/herdr`](https://github.com/lsisoft/herdr); there is not a second
+Herdr-specific bridge checkout.
 
 Install directly from GitHub:
 

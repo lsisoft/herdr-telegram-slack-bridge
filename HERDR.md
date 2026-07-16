@@ -1,6 +1,9 @@
 # Herdr Telegram and Slack integration
 
-This directory is also a Herdr plugin. It uses Herdr's
+This directory is the bridge repository and is also a plugin for the
+[`lsisoft/herdr`](https://github.com/lsisoft/herdr) agent multiplexer. It is
+not the Herdr runtime and does not own agent launch, restart, model, compute,
+or permission state. It uses Herdr's
 `pane.agent_status_changed` event and forwards `blocked` agents to the same
 Telegram and Slack bot bridge used by the Codex and Claude hooks. Replies are sent to
 the Herdr pane with `herdr pane run`, so no tmux emulation is required.

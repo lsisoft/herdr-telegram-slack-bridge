@@ -5,6 +5,10 @@ description = "Bidirectional Telegram and Slack bot bridge for Herdr, Codex, and
 requires-python = ">=3.11"
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/lsisoft/herdr-telegram-slack-bridge"
+Herdr = "https://github.com/lsisoft/herdr"
+
 [project.scripts]
 herdr-telegram-slack-bridge = "agent_telegram_bridge.cli:main"
 
