@@ -40,7 +40,8 @@ precedence. The transport and state store are otherwise shared.
 - Enriches each alert with hostname, Herdr/tmux routing details, pane id, cwd, and the question/message.
 - Stores a short ticket id for each alert, preferring one unused digit and then lowercase ids like `ab1`.
 - Splits long Telegram and Slack alerts/responses into multiple messages instead of truncating the question.
-- Sends Telegram output as escaped `MarkdownV2`.
+- Sends Telegram output as `MarkdownV2` fenced code blocks so multiline agent messages render consistently.
+- Sends Slack output as Slack `mrkdwn`, using native table blocks for simple Markdown tables and fenced fallback text for tabular/preformatted sections.
 - Can route Telegram alerts into forum topics, one topic per exact Herdr tab or tmux window label, when `TELEGRAM_BRIDGE_FORUM_TOPICS=1` is enabled in a forum-enabled supergroup.
 - Posts alerts to Slack, one Slack thread per exact pane alert, and receives Slack thread replies through Web API polling. Slack Events API mode is also available.
 - Works with Herdr panes as well as tmux panes. The included `herdr-plugin.toml` emits alerts for Herdr `blocked` agents and sends replies through Herdr's pane API.
@@ -86,6 +87,7 @@ SLACK_BRIDGE_HTTP_PORT=8797
 SLACK_BRIDGE_HTTP_PATH=/slack/events
 
 HERDR_BRIDGE_STATUSES=blocked # use blocked,done to include completed agents
+AGENT_BRIDGE_IDLE_STATUSES=done,blocked,idle # for non-Herdr agents that include status in payloads
 ```
 
 For local Slack setup, edit the ignored `.env` beside the bridge package, or use `~/.config/agent_telegram_bridge/env`.

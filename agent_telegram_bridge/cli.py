@@ -41,7 +41,18 @@ MAX_SLACK_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_SLACK_POLL_LIMIT = 100
 MAX_TELEGRAM_TEXT = 3900
 MAX_SLACK_TEXT = 3900
+MAX_SLACK_BLOCKS = 50
+SLACK_SECTION_TEXT_LIMIT = 3000
+MAX_SLACK_TABLE_ROWS = 100
+MAX_SLACK_TABLE_COLUMNS = 20
+MAX_SLACK_TABLE_CHARS = 10_000
+DEFAULT_AGENT_IDLE_STATUSES = {"done", "blocked", "idle"}
 TELEGRAM_MARKDOWN_V2_SPECIAL_CHARS = frozenset("\\_*[]()~`>#+-=|{}.!")
+TELEGRAM_CODE_BLOCK_OVERHEAD = len("```\n\n```")
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+MARKDOWN_BOLD_RE = re.compile(r"(?<!\\)\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*")
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+MARKDOWN_TABLE_SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
 TICKET_RE = re.compile(
     r"\b(?:ticket|reply|id)\s*[:#]?\s*([a-z]{2}\d|[A-Z0-9]{3,12}|\d)\b",
     re.IGNORECASE,
@@ -417,6 +428,14 @@ def telegram_markdown_v2_escape(text: str) -> str:
     )
 
 
+def telegram_markdown_v2_code_escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("`", "\\`")
+
+
+def telegram_markdown_v2_code_block(text: str) -> str:
+    return f"```\n{telegram_markdown_v2_code_escape(text)}\n```"
+
+
 def telegram_send_message(
     chat_id: str,
     text: str,
@@ -425,7 +444,7 @@ def telegram_send_message(
     markdown_escaped: bool = False,
     message_thread_id: int | str | None = None,
 ) -> dict[str, Any]:
-    outbound_text = text if markdown_escaped else telegram_markdown_v2_escape(text)
+    outbound_text = text if markdown_escaped else telegram_markdown_v2_code_block(text)
     if len(outbound_text) > MAX_TELEGRAM_TEXT:
         raise ValueError("telegram_send_message received oversized text; use telegram_send_messages")
     body: dict[str, Any] = {
@@ -481,6 +500,49 @@ def split_telegram_text(
     return chunks
 
 
+def split_telegram_code_text(
+    text: str,
+    *,
+    continuation_prefix: str = "",
+    max_chars: int | None = None,
+) -> list[str]:
+    limit = MAX_TELEGRAM_TEXT if max_chars is None else max_chars
+    if limit <= TELEGRAM_CODE_BLOCK_OVERHEAD:
+        raise ValueError("max_chars is too small for a Telegram code block")
+    if len(telegram_markdown_v2_code_block(text)) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    first = True
+    while remaining:
+        prefix = "" if first else continuation_prefix
+        budget = (
+            limit
+            - TELEGRAM_CODE_BLOCK_OVERHEAD
+            - len(telegram_markdown_v2_code_escape(prefix))
+        )
+        if budget <= 0:
+            raise ValueError("continuation prefix is too long for Telegram message limit")
+
+        upper = min(len(remaining), budget)
+        while upper > 0:
+            chunk, next_remaining = split_text_at_boundary(remaining, upper)
+            if not chunk and remaining:
+                chunk = remaining[:upper].rstrip() or remaining[:upper]
+                next_remaining = remaining[upper:].lstrip("\n ")
+            candidate = f"{prefix}{chunk}"
+            if chunk and len(telegram_markdown_v2_code_block(candidate)) <= limit:
+                chunks.append(candidate)
+                remaining = next_remaining
+                break
+            upper -= max(1, (len(telegram_markdown_v2_code_block(candidate)) - limit + 1) // 2)
+        else:
+            raise ValueError("telegram_send_messages could not fit text in a code block")
+        first = False
+    return chunks
+
+
 def telegram_send_messages(
     chat_id: str,
     text: str,
@@ -489,17 +551,14 @@ def telegram_send_messages(
     continuation_prefix: str = "",
     message_thread_id: int | str | None = None,
 ) -> list[dict[str, Any]]:
-    chunks = split_telegram_text(
-        telegram_markdown_v2_escape(text),
-        continuation_prefix=telegram_markdown_v2_escape(continuation_prefix),
-    )
+    chunks = split_telegram_code_text(text, continuation_prefix=continuation_prefix)
     results: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
         markup = reply_markup if index == len(chunks) - 1 else None
         results.append(
             telegram_send_message(
                 chat_id,
-                chunk,
+                telegram_markdown_v2_code_block(chunk),
                 reply_markup=markup,
                 markdown_escaped=True,
                 message_thread_id=message_thread_id,
@@ -673,8 +732,243 @@ def slack_enabled() -> bool:
     return bool(slack_bot_token() and slack_channel_id())
 
 
+@dataclass
+class SlackRenderSegment:
+    kind: str
+    text: str
+    table_rows: list[list[str]] | None = None
+    table_alignments: list[str] | None = None
+
+
 def slack_escape_text(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def slack_mrkdwn_code_block(text: str) -> str:
+    return f"```\n{slack_escape_text(text)}\n```"
+
+
+def slack_escape_link_url(url: str) -> str:
+    return str(url).replace("<", "%3C").replace(">", "%3E").replace("|", "%7C")
+
+
+def slack_markdown_to_mrkdwn(text: str) -> str:
+    link_placeholders: list[tuple[str, str]] = []
+
+    def replace_link(match: re.Match[str]) -> str:
+        token = f"\x00SLACK_LINK_{len(link_placeholders)}\x00"
+        label = slack_escape_text(match.group(1))
+        url = slack_escape_link_url(match.group(2))
+        link_placeholders.append((token, f"<{url}|{label}>"))
+        return token
+
+    working = MARKDOWN_LINK_RE.sub(replace_link, str(text))
+    working = MARKDOWN_BOLD_RE.sub(r"*\1*", working)
+    rendered_lines: list[str] = []
+    for line in working.splitlines():
+        heading = MARKDOWN_HEADING_RE.match(line)
+        rendered_lines.append(f"*{heading.group(1).strip()}*" if heading else line)
+
+    rendered = slack_escape_text("\n".join(rendered_lines))
+    for token, replacement in link_placeholders:
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def split_markdown_table_row(line: str) -> list[str]:
+    stripped = str(line).strip()
+    if "|" not in stripped:
+        return []
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            current.append(char)
+            continue
+        if char == "|":
+            cells.append("".join(current).replace(r"\|", "|").strip())
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current).replace(r"\|", "|").strip())
+    return cells if len(cells) >= 2 else []
+
+
+def markdown_table_alignments(line: str) -> list[str]:
+    cells = split_markdown_table_row(line)
+    alignments: list[str] = []
+    for cell in cells:
+        token = cell.replace(" ", "")
+        if not MARKDOWN_TABLE_SEPARATOR_CELL_RE.fullmatch(token):
+            return []
+        if token.startswith(":") and token.endswith(":"):
+            alignments.append("center")
+        elif token.endswith(":"):
+            alignments.append("right")
+        else:
+            alignments.append("left")
+    return alignments
+
+
+def parse_markdown_table_at(lines: list[str], start: int) -> tuple[list[list[str]], list[str], int] | None:
+    if start + 1 >= len(lines):
+        return None
+    header = split_markdown_table_row(lines[start])
+    alignments = markdown_table_alignments(lines[start + 1])
+    if not header or not alignments or len(header) != len(alignments):
+        return None
+
+    rows = [header]
+    index = start + 2
+    while index < len(lines):
+        row = split_markdown_table_row(lines[index])
+        if len(row) != len(header):
+            break
+        rows.append(row)
+        index += 1
+    return rows, alignments, index
+
+
+def slack_parse_render_segments(text: str) -> list[SlackRenderSegment]:
+    lines = str(text).splitlines()
+    if not lines:
+        return [SlackRenderSegment("normal", "")]
+
+    segments: list[SlackRenderSegment] = []
+    normal_lines: list[str] = []
+
+    def flush_normal() -> None:
+        segment_text = "\n".join(normal_lines).strip("\n")
+        if segment_text:
+            segments.append(SlackRenderSegment("normal", segment_text))
+        normal_lines.clear()
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.lstrip().startswith("```"):
+            flush_normal()
+            code_lines = [line]
+            index += 1
+            while index < len(lines):
+                code_lines.append(lines[index])
+                index += 1
+                if code_lines[-1].lstrip().startswith("```"):
+                    break
+            segments.append(SlackRenderSegment("pre", "\n".join(code_lines)))
+            continue
+
+        parsed_table = parse_markdown_table_at(lines, index)
+        if parsed_table:
+            flush_normal()
+            rows, alignments, end_index = parsed_table
+            segments.append(
+                SlackRenderSegment(
+                    "table",
+                    "\n".join(lines[index:end_index]),
+                    table_rows=rows,
+                    table_alignments=alignments,
+                )
+            )
+            index = end_index
+            continue
+
+        normal_lines.append(line)
+        index += 1
+
+    flush_normal()
+    return segments
+
+
+def slack_mrkdwn_section_blocks(rendered: str) -> list[dict[str, Any]]:
+    if not rendered:
+        return []
+    blocks: list[dict[str, Any]] = []
+    for chunk in split_telegram_text(rendered, max_chars=SLACK_SECTION_TEXT_LIMIT):
+        if not chunk:
+            continue
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk}})
+    return blocks
+
+
+def slack_section_blocks(text: str, *, preformatted: bool = False) -> list[dict[str, Any]]:
+    rendered = slack_escape_text(text) if preformatted else slack_markdown_to_mrkdwn(text)
+    return slack_mrkdwn_section_blocks(rendered)
+
+
+def slack_table_block(
+    rows: list[list[str]] | None,
+    alignments: list[str] | None,
+) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    column_count = len(rows[0])
+    if (
+        column_count <= 0
+        or column_count > MAX_SLACK_TABLE_COLUMNS
+        or len(rows) > MAX_SLACK_TABLE_ROWS
+        or any(len(row) != column_count for row in rows)
+    ):
+        return None
+
+    table_chars = sum(len(cell) for row in rows for cell in row)
+    if table_chars > MAX_SLACK_TABLE_CHARS:
+        return None
+
+    block: dict[str, Any] = {
+        "type": "table",
+        "rows": [
+            [{"type": "raw_text", "text": cell if cell else " "} for cell in row]
+            for row in rows
+        ],
+    }
+    if alignments:
+        block["column_settings"] = [
+            {
+                **({"align": alignment} if alignment in {"center", "right"} else {}),
+                "is_wrapped": True,
+            }
+            for alignment in alignments[:column_count]
+        ]
+    return block
+
+
+def slack_render_message(text: str) -> tuple[str, list[dict[str, Any]]]:
+    fallback_parts: list[str] = []
+    blocks: list[dict[str, Any]] = []
+    has_native_table = False
+
+    for segment in slack_parse_render_segments(text):
+        if segment.kind == "table":
+            fallback_parts.append(slack_mrkdwn_code_block(segment.text))
+            table_block = slack_table_block(segment.table_rows, segment.table_alignments)
+            if table_block:
+                blocks.append(table_block)
+                has_native_table = True
+            else:
+                blocks.extend(slack_mrkdwn_section_blocks(slack_mrkdwn_code_block(segment.text)))
+        elif segment.kind == "pre":
+            fallback_parts.append(slack_escape_text(segment.text))
+            blocks.extend(slack_section_blocks(segment.text, preformatted=True))
+        else:
+            fallback_parts.append(slack_markdown_to_mrkdwn(segment.text))
+            blocks.extend(slack_section_blocks(segment.text))
+
+    fallback = "\n\n".join(part for part in fallback_parts if part).strip() or " "
+    if not has_native_table or len(blocks) > MAX_SLACK_BLOCKS:
+        return fallback, []
+    return fallback, blocks
 
 
 def slack_request(method: str, params: dict[str, Any], *, use_get: bool = False) -> dict[str, Any]:
@@ -701,13 +995,16 @@ def slack_request(method: str, params: dict[str, Any], *, use_get: bool = False)
 
 
 def slack_send_message(channel_id: str, text: str, *, thread_ts: str = "") -> dict[str, Any]:
+    rendered_text, blocks = slack_render_message(text)
     body: dict[str, Any] = {
         "channel": channel_id,
-        "text": slack_escape_text(text),
+        "text": rendered_text,
         "mrkdwn": True,
         "unfurl_links": False,
         "unfurl_media": False,
     }
+    if blocks:
+        body["blocks"] = blocks
     if thread_ts:
         body["thread_ts"] = thread_ts
     return slack_request("chat.postMessage", body)
@@ -1158,6 +1455,72 @@ def payload_kind(payload: dict[str, Any]) -> str:
     if payload.get("herdr_event") or payload.get("pane_id") and payload.get("agent_status"):
         return "herdr"
     return ""
+
+
+def parse_status_set(raw: str, *, default: str = "") -> set[str]:
+    value = raw.strip().lower() if raw else default.strip().lower()
+    return {token.strip() for token in value.split(",") if token.strip()}
+
+
+def terminal_statuses_for_kind(kind: str) -> set[str]:
+    if kind == "herdr":
+        return parse_status_set(env_value("HERDR_BRIDGE_STATUSES", default="blocked"))
+    return parse_status_set(
+        env_value("AGENT_BRIDGE_IDLE_STATUSES", "AGENT_IDLE_STATUSES", default=",".join(sorted(DEFAULT_AGENT_IDLE_STATUSES)))
+    )
+
+
+def status_tracker_key(kind: str, payload: dict[str, Any], pane: PaneInfo) -> str:
+    value = ""
+    if kind == "herdr":
+        value = str(payload.get("pane_id") or pane.pane_id or "").strip().lower()
+    elif kind in {"codex", "claude"}:
+        value = str(
+            payload.get("thread-id")
+            or payload.get("thread_id")
+            or payload.get("session_id")
+            or pane.pane_id
+            or ""
+        ).strip().lower()
+    else:
+        value = str(payload.get("thread-id") or payload.get("session_id") or pane.pane_id or "").strip().lower()
+    if not value:
+        return ""
+    return f"{kind}:{value}"
+
+
+def should_emit_on_status_transition(
+    kind: str,
+    payload: dict[str, Any],
+    pane: PaneInfo,
+    status: str,
+    store: StateStore,
+) -> bool:
+    status_value = str(status or "").strip().lower()
+    if not status_value:
+        return True
+    terminal = terminal_statuses_for_kind(kind)
+    key = status_tracker_key(kind, payload, pane)
+    if not key:
+        return status_value in terminal
+
+    def mutate(state: dict[str, Any]) -> bool:
+        trackers = state.get("agent_status_trackers")
+        if not isinstance(trackers, dict):
+            trackers = {}
+            state["agent_status_trackers"] = trackers
+        previous = str(trackers.get(key) or "").strip().lower()
+        trackers[key] = status_value
+        state["updated_at"] = int(time.time())
+        if status_value not in terminal:
+            return False
+        if not previous:
+            return True
+        if previous not in terminal:
+            return True
+        return previous != status_value
+
+    return store.update(mutate)
 
 
 def subprocess_text(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1634,6 +1997,14 @@ def notify(argv: list[str]) -> int:
             return 0
         pane = current_tmux_pane()
         store = StateStore(state_file())
+        if not should_emit_on_status_transition(
+            kind,
+            payload,
+            pane,
+            str(payload.get("status") or payload.get("agent_status") or "").strip().lower(),
+            store,
+        ):
+            return 0
         existing = store.read().get("alerts", {})
         alert = create_alert(
             kind,
@@ -2141,11 +2512,7 @@ def herdr_event() -> int:
         or os.environ.get("HERDR_PANE_ID", "")
     ).strip()
     status = str(data.get("agent_status") or data.get("status") or "").strip().lower()
-    allowed = {
-        value.strip().lower()
-        for value in os.environ.get("HERDR_BRIDGE_STATUSES", "blocked").split(",")
-        if value.strip()
-    }
+    allowed = terminal_statuses_for_kind("herdr")
     if not pane_id or status not in allowed:
         return 0
     os.environ["HERDR_PANE_ID"] = pane_id

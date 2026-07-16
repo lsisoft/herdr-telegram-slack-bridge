@@ -120,6 +120,95 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(payload["pane_id"], "w1:p2")
         self.assertEqual(payload["agent_status"], "blocked")
 
+    def test_herdr_event_ignores_repeated_blocked_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                cli.os.environ,
+                {
+                    "HERDR_PLUGIN_CONTEXT_JSON": "{}",
+                    "TELEGRAM_BRIDGE_ENABLED": "0",
+                    "HERDR_BRIDGE_STATUSES": "blocked",
+                    "TELEGRAM_BRIDGE_STATE_FILE": str(Path(tmp) / "state.json"),
+                },
+                clear=False,
+            ):
+                cli.os.environ["HERDR_PLUGIN_EVENT_JSON"] = (
+                    '{"data":{"pane_id":"w1:p2","agent_status":"blocked","message":"approve"}}'
+                )
+                self.assertEqual(cli.herdr_event(), 0)
+                self.assertEqual(cli.herdr_event(), 0)
+            state = cli.StateStore(Path(tmp) / "state.json").read()
+            self.assertEqual(len(state.get("alerts", {})), 1)
+
+    def test_herdr_event_emits_on_blocked_transition_after_working(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                cli.os.environ,
+                {
+                    "HERDR_PLUGIN_CONTEXT_JSON": "{}",
+                    "TELEGRAM_BRIDGE_ENABLED": "0",
+                    "HERDR_BRIDGE_STATUSES": "blocked",
+                    "TELEGRAM_BRIDGE_STATE_FILE": str(Path(tmp) / "state.json"),
+                },
+                clear=False,
+            ):
+                cli.os.environ["HERDR_PLUGIN_EVENT_JSON"] = (
+                    '{"data":{"pane_id":"w1:p2","agent_status":"working"}}'
+                )
+                self.assertEqual(cli.herdr_event(), 0)
+                state = cli.StateStore(Path(tmp) / "state.json").read()
+                self.assertEqual(len(state.get("alerts", {})), 0)
+                cli.os.environ["HERDR_PLUGIN_EVENT_JSON"] = (
+                    '{"data":{"pane_id":"w1:p2","agent_status":"blocked","message":"approve"}}'
+                )
+                self.assertEqual(cli.herdr_event(), 0)
+                state = cli.StateStore(Path(tmp) / "state.json").read()
+                self.assertEqual(len(state.get("alerts", {})), 1)
+                cli.os.environ["HERDR_PLUGIN_EVENT_JSON"] = (
+                    '{"data":{"pane_id":"w1:p2","agent_status":"blocked","message":"still blocked"}}'
+                )
+                self.assertEqual(cli.herdr_event(), 0)
+                state = cli.StateStore(Path(tmp) / "state.json").read()
+                self.assertEqual(len(state.get("alerts", {})), 1)
+
+    def test_notify_uses_status_transition_for_codex_like_payloads(self) -> None:
+        payload_working = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "status": "working",
+            "last-assistant-message": "Need input",
+            "cwd": "/work",
+        }
+        payload_idle = {
+            "type": "agent-turn-complete",
+            "thread-id": "thread-1",
+            "status": "idle",
+            "last-assistant-message": "Need input",
+            "cwd": "/work",
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            cli.os.environ,
+            {
+                "TELEGRAM_BRIDGE_ENABLED": "0",
+                "TELEGRAM_BRIDGE_STATE_FILE": str(Path(tmp) / "state.json"),
+            },
+            clear=False,
+        ):
+            self.assertEqual(cli.notify([cli.json.dumps(payload_working)]), 0)
+            state = cli.StateStore(Path(tmp) / "state.json").read()
+            self.assertEqual(state.get("alerts", {}), {})
+            self.assertEqual(state.get("agent_status_trackers", {}).get("codex:thread-1"), "working")
+
+            self.assertEqual(cli.notify([cli.json.dumps(payload_idle)]), 0)
+            state = cli.StateStore(Path(tmp) / "state.json").read()
+            self.assertEqual(len(state.get("alerts", {})), 1)
+            self.assertIn("codex:thread-1", state.get("agent_status_trackers", {}))
+
+            self.assertEqual(cli.notify([cli.json.dumps(payload_idle)]), 0)
+            state = cli.StateStore(Path(tmp) / "state.json").read()
+            alerts = state.get("alerts", {})
+            self.assertEqual(len(alerts), 1)
+
     def confirmed_send_result(self) -> cli.TmuxSendResult:
         return cli.TmuxSendResult(
             processed=True,
@@ -160,6 +249,12 @@ class BridgeTests(unittest.TestCase):
             r"a\_b \[x\]\(y\) \#1\! path\\name",
         )
 
+    def test_telegram_markdown_v2_code_block_escapes_code_delimiters(self) -> None:
+        self.assertEqual(
+            cli.telegram_markdown_v2_code_block("tick ` and slash \\"),
+            "```\ntick \\` and slash \\\\\n```",
+        )
+
     def test_telegram_send_message_uses_markdown_v2_payload(self) -> None:
         with mock.patch.object(cli, "telegram_request", return_value={"message_id": 7}) as request:
             result = cli.telegram_send_message("99", "codex needs input [1] path=/tmp/a_b!")
@@ -168,7 +263,7 @@ class BridgeTests(unittest.TestCase):
         method, body = request.call_args.args
         self.assertEqual(method, "sendMessage")
         self.assertEqual(body["parse_mode"], "MarkdownV2")
-        self.assertEqual(body["text"], r"codex needs input \[1\] path\=/tmp/a\_b\!")
+        self.assertEqual(body["text"], "```\ncodex needs input [1] path=/tmp/a_b!\n```")
 
     def test_telegram_send_message_includes_forum_thread_id(self) -> None:
         with mock.patch.object(cli, "telegram_request", return_value={"message_id": 7}) as request:
@@ -294,6 +389,35 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(body["channel"], "C1")
         self.assertEqual(body["thread_ts"], "9.9")
         self.assertEqual(body["text"], "a &lt; b &amp; c &gt; d")
+        self.assertNotIn("blocks", body)
+
+    def test_slack_send_message_converts_common_markdown_to_mrkdwn(self) -> None:
+        text = "# Result\nSee **details** in [docs](https://example.com/a?b=1&c=2)."
+        with mock.patch.object(cli, "slack_request", return_value={"ok": True, "ts": "1.2"}) as request:
+            cli.slack_send_message("C1", text)
+        body = request.call_args.args[1]
+        self.assertEqual(
+            body["text"],
+            "*Result*\nSee *details* in <https://example.com/a?b=1&c=2|docs>.",
+        )
+        self.assertNotIn("blocks", body)
+
+    def test_slack_send_message_renders_markdown_tables_as_table_blocks(self) -> None:
+        text = "Summary **ok**\n\n| Name | PnL |\n| --- | ---: |\n| alpha | 12 |\n\nDone"
+        with mock.patch.object(cli, "slack_request", return_value={"ok": True, "ts": "1.2"}) as request:
+            cli.slack_send_message("C1", text)
+        body = request.call_args.args[1]
+        self.assertIn("Summary *ok*", body["text"])
+        self.assertIn("```\n| Name | PnL |\n| --- | ---: |\n| alpha | 12 |\n```", body["text"])
+        blocks = body["blocks"]
+        self.assertEqual(blocks[0]["type"], "section")
+        self.assertEqual(blocks[0]["text"]["text"], "Summary *ok*")
+        self.assertEqual(blocks[1]["type"], "table")
+        self.assertEqual(blocks[1]["rows"][0][0], {"type": "raw_text", "text": "Name"})
+        self.assertEqual(blocks[1]["rows"][1][1], {"type": "raw_text", "text": "12"})
+        self.assertEqual(blocks[1]["column_settings"][1]["align"], "right")
+        self.assertEqual(blocks[2]["type"], "section")
+        self.assertEqual(blocks[2]["text"]["text"], "Done")
 
     def test_slack_command_accepts_plain_thread_commands(self) -> None:
         self.assertEqual(cli.slack_command("reply A1B ship it"), ("reply", "A1B ship it"))
@@ -330,6 +454,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(method, "chat.postMessage")
         self.assertNotIn("thread_ts", body)
         self.assertEqual(body["text"].splitlines()[0], "test-host:codex:1:fx [fx1]")
+        self.assertNotIn("blocks", body)
         self.assertNotIn("/reply", body["text"])
 
     def test_slack_notify_alert_creates_new_channel_message_per_alert(self) -> None:
@@ -431,7 +556,7 @@ class BridgeTests(unittest.TestCase):
         self.assertGreater(send.call_count, 1)
         self.assertIsNone(send.call_args_list[0].kwargs["reply_markup"])
         self.assertEqual(send.call_args_list[-1].kwargs["reply_markup"], reply_markup)
-        self.assertTrue(send.call_args_list[1].args[1].startswith(r"codex needs input \[1\] continued"))
+        self.assertTrue(send.call_args_list[1].args[1].startswith("```\ncodex needs input [1] continued"))
         self.assertTrue(all(call.kwargs["markdown_escaped"] for call in send.call_args_list))
 
     def test_create_alert_uses_pane_metadata(self) -> None:
