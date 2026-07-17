@@ -908,18 +908,89 @@ class BridgeTests(unittest.TestCase):
             },
             "alerts": {
                 "fx1": {
+                    "status": "open",
                     "created_at": now - 60,
+                    "send_target": "%9",
                     "slack_channel_id": "C1",
                     "slack_thread_ts": "10.0",
                 },
                 "fx2": {
+                    "status": "open",
                     "created_at": now - 2 * 24 * 3600,
+                    "send_target": "%10",
                     "slack_channel_id": "C1",
                     "slack_thread_ts": "20.0",
                 },
             },
         }
         self.assertEqual(cli.slack_thread_targets(state), [("C1", "10.0")])
+
+    def test_slack_thread_targets_only_latest_open_thread_per_route(self) -> None:
+        now = int(time.time())
+        state = {
+            "alerts": {
+                "old": {
+                    "status": "open",
+                    "created_at": now - 120,
+                    "send_target": "w1:p7",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "10.0",
+                },
+                "new": {
+                    "status": "open",
+                    "created_at": now - 60,
+                    "send_target": "w1:p7",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "20.0",
+                },
+                "answered": {
+                    "status": "answered",
+                    "created_at": now - 30,
+                    "send_target": "w1:p8",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "30.0",
+                },
+                "other": {
+                    "status": "open",
+                    "created_at": now - 90,
+                    "send_target": "w1:p9",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "40.0",
+                },
+            },
+        }
+        self.assertEqual(cli.slack_thread_targets(state), [("C1", "20.0"), ("C1", "40.0")])
+
+    def test_slack_thread_targets_for_poll_rotates_limited_targets(self) -> None:
+        now = int(time.time())
+        state = {
+            "slack_poll_cursor": "C1:20.0",
+            "alerts": {
+                "a": {
+                    "status": "open",
+                    "created_at": now - 30,
+                    "send_target": "w1:p1",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "10.0",
+                },
+                "b": {
+                    "status": "open",
+                    "created_at": now - 20,
+                    "send_target": "w1:p2",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "20.0",
+                },
+                "c": {
+                    "status": "open",
+                    "created_at": now - 10,
+                    "send_target": "w1:p3",
+                    "slack_channel_id": "C1",
+                    "slack_thread_ts": "30.0",
+                },
+            },
+        }
+        with mock.patch.object(cli, "slack_threads_per_poll", return_value=1):
+            self.assertEqual(cli.slack_thread_targets_for_poll(state), [("C1", "10.0")])
 
     def test_tmux_send_text_submits_with_enter_and_carriage_returns(self) -> None:
         with mock.patch.object(cli, "tmux_send_literal") as send_literal, mock.patch.object(

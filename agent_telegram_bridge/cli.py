@@ -39,6 +39,8 @@ DEFAULT_POLL_LIMIT = 50
 DEFAULT_SLACK_POLL_INTERVAL_SECONDS = 3.0
 MAX_SLACK_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_SLACK_POLL_LIMIT = 100
+DEFAULT_SLACK_THREADS_PER_POLL = 1
+MAX_SLACK_THREADS_PER_POLL = 10
 MAX_TELEGRAM_TEXT = 3900
 MAX_SLACK_TEXT = 3900
 MAX_SLACK_BLOCKS = 50
@@ -386,6 +388,14 @@ def slack_poll_limit() -> int:
         return max(1, min(1000, int(raw)))
     except Exception:
         return DEFAULT_SLACK_POLL_LIMIT
+
+
+def slack_threads_per_poll() -> int:
+    raw = env_value("SLACK_BRIDGE_THREADS_PER_POLL", default=str(DEFAULT_SLACK_THREADS_PER_POLL))
+    try:
+        return max(1, min(MAX_SLACK_THREADS_PER_POLL, int(raw)))
+    except Exception:
+        return DEFAULT_SLACK_THREADS_PER_POLL
 
 
 def ca_bundle() -> str:
@@ -1186,6 +1196,13 @@ def slack_thread_poll_key(channel_id: str, thread_ts: str) -> str:
     return f"{channel_id}:{thread_ts}"
 
 
+def slack_alert_route_key(alert: dict[str, Any], channel_id: str) -> str:
+    target = str(alert.get("send_target") or "").strip()
+    display = str(alert.get("display_target") or "").strip()
+    route = target or display or str(alert.get("id") or "").strip()
+    return f"{channel_id}:{route}"
+
+
 def mark_slack_thread_seen(store: StateStore, channel_id: str, thread_ts: str, ts: str) -> None:
     if not channel_id or not thread_ts or not ts:
         return
@@ -1199,6 +1216,17 @@ def mark_slack_thread_seen(store: StateStore, channel_id: str, thread_ts: str, t
         if slack_ts_greater(ts, previous):
             seen[key] = ts
             state["updated_at"] = int(time.time())
+
+    store.update(mutate)
+
+
+def mark_slack_poll_cursor(store: StateStore, channel_id: str, thread_ts: str) -> None:
+    if not channel_id or not thread_ts:
+        return
+
+    def mutate(state: dict[str, Any]) -> None:
+        state["slack_poll_cursor"] = slack_thread_poll_key(channel_id, thread_ts)
+        state["updated_at"] = int(time.time())
 
     store.update(mutate)
 
@@ -1271,11 +1299,13 @@ def slack_conversations_replies(
 
 
 def slack_thread_targets(state: dict[str, Any]) -> list[tuple[str, str]]:
-    targets: dict[str, tuple[str, str]] = {}
+    targets: dict[str, tuple[int, str, str]] = {}
     alerts = state.get("alerts") if isinstance(state.get("alerts"), dict) else {}
     now = int(time.time())
     for alert in alerts.values():
         if not isinstance(alert, dict):
+            continue
+        if str(alert.get("status") or "") != "open":
             continue
         try:
             created_at = int(alert.get("created_at"))
@@ -1286,8 +1316,36 @@ def slack_thread_targets(state: dict[str, Any]) -> list[tuple[str, str]]:
         channel_id = str(alert.get("slack_channel_id") or "").strip()
         thread_ts = str(alert.get("slack_thread_ts") or "").strip()
         if channel_id and thread_ts:
-            targets[slack_thread_poll_key(channel_id, thread_ts)] = (channel_id, thread_ts)
-    return sorted(targets.values())
+            route_key = slack_alert_route_key(alert, channel_id)
+            previous = targets.get(route_key)
+            if previous is None or created_at > previous[0] or (
+                created_at == previous[0] and slack_ts_greater(thread_ts, previous[2])
+            ):
+                targets[route_key] = (created_at, channel_id, thread_ts)
+    return [
+        (channel_id, thread_ts)
+        for _, channel_id, thread_ts in sorted(
+            targets.values(),
+            key=lambda item: (-item[0], item[1], slack_ts_decimal(item[2])),
+        )
+    ]
+
+
+def slack_thread_targets_for_poll(state: dict[str, Any]) -> list[tuple[str, str]]:
+    targets = slack_thread_targets(state)
+    limit = slack_threads_per_poll()
+    if len(targets) <= limit:
+        return targets
+
+    cursor = str(state.get("slack_poll_cursor") or "")
+    start = 0
+    if cursor:
+        for index, (channel_id, thread_ts) in enumerate(targets):
+            if slack_thread_poll_key(channel_id, thread_ts) == cursor:
+                start = (index + 1) % len(targets)
+                break
+    rotated = targets[start:] + targets[:start]
+    return rotated[:limit]
 
 
 def initial_slack_poll_ts(state: dict[str, Any], channel_id: str, thread_ts: str) -> str:
@@ -1351,18 +1409,24 @@ def slack_poll_thread(store: StateStore, channel_id: str, thread_ts: str) -> int
 def slack_poll_once(store: StateStore) -> int:
     state = store.read()
     total = 0
-    for channel_id, thread_ts in slack_thread_targets(state):
-        try:
-            total += slack_poll_thread(store, channel_id, thread_ts)
-        except RuntimeError as exc:
-            if not is_slack_thread_not_found_error(exc):
-                raise
-            removed = prune_stale_slack_thread(store, channel_id, thread_ts)
-            print(
-                "[agent_telegram_bridge slack-daemon] pruned missing Slack thread "
-                f"{channel_id}:{thread_ts} ({', '.join(removed) or 'state only'})",
-                file=sys.stderr,
-            )
+    last_target: tuple[str, str] | None = None
+    try:
+        for channel_id, thread_ts in slack_thread_targets_for_poll(state):
+            last_target = (channel_id, thread_ts)
+            try:
+                total += slack_poll_thread(store, channel_id, thread_ts)
+            except RuntimeError as exc:
+                if not is_slack_thread_not_found_error(exc):
+                    raise
+                removed = prune_stale_slack_thread(store, channel_id, thread_ts)
+                print(
+                    "[agent_telegram_bridge slack-daemon] pruned missing Slack thread "
+                    f"{channel_id}:{thread_ts} ({', '.join(removed) or 'state only'})",
+                    file=sys.stderr,
+                )
+    finally:
+        if last_target:
+            mark_slack_poll_cursor(store, *last_target)
     return total
 
 
